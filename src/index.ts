@@ -93,7 +93,7 @@ function execute(targetWebviewId: string, req: IReq) {
               obj[k] = function () {
                 var args = Array.prototype.slice.call(arguments, 0);
                 invoke({
-                  targetWebviewId: targetWebviewId,
+                  targetWebviewId,
                   namespace: 'webviewCallbacks',
                   functionName: fName!,
                   params: args,
@@ -156,8 +156,10 @@ function invoke(req: IReq) {
       data: reqString,
     });
   } else {
-    // iframe일때
-    parent.postMessage(reqString, '*');
+    parent.postMessage({
+      'command': 'invoke',
+      'params': reqString
+    }, '*');
   }
 }
 
@@ -173,19 +175,25 @@ export default {
       window.webkit.messageHandlers.setWebviewId
     ) {
       window.webkit.messageHandlers.setWebviewId.postMessage(webviewId);
+    } else {
+      parent.postMessage({
+        'command': 'setWebviewId',
+        'params': webviewId
+      }, '*');
     }
 
     // Native에서 던진 message를 받는다.
     window.addEventListener('message', function (e) {
-      var message = e.data;
+      const message = e.data;
       if (message.data) {
+        var targetWebviewIdForResult = message.sourceWebviewId;
         var req = message.data;
         if (typeof message.data === 'string') {
           req = JSON.parse(message.data);
         }
 
         // sourceWebviewId는 실제 타켓임.
-        execute(message.sourceWebviewId, req);
+        execute(targetWebviewIdForResult, req);
       }
     });
   },
