@@ -1,5 +1,6 @@
-interface WebViewCallbacks {
-  [key: string]: Function;
+export type FnType = (...args: any) => void|boolean|Promise<void|boolean>
+export interface WebViewCallbacks {
+  [key: string]: FnType;
 }
 
 declare global {
@@ -7,52 +8,53 @@ declare global {
     android: any;
     webkit: any;
     webviewCallbacks: WebViewCallbacks
-    FunctionsProvider: WebViewCallbacks;
+    functionsProvider: WebViewCallbacks;
   }
 }
 
-interface IJSON {
-  [key: string]: string|number|boolean|Function|Object|Array<any>;
-}
-
-interface IReq {
-  targetWebviewId: string;
-  namespace: string;
-  functionName: string;
-  params: Array<any> | string;
-}
+type IJSON = string|number|boolean|FnType|Object|Array<IJSON>;
 
 let funcCnt = 0;
-
 window.webviewCallbacks = {};
-window.FunctionsProvider = {};
 
-function makeParamsString(params: Array<any>) {
-  function makeFunction(func: Function) {
-    var fName = 'funcToCall_' + funcCnt++;
-    window.webviewCallbacks[fName] = function () {
-      var args = Array.prototype.slice.call(arguments, 0);
-      var ret = func.apply(null, args);
-      if (ret !== true) {
-        delete window.webviewCallbacks[fName];
+/**
+ * 다른 WebView에서 제공하는 함수를 호출하기 위한 파라미터 생성
+ * @param params 파라미터의 배열
+ * @returns 
+ */
+function makeParamsString(params: Array<IJSON>) {
+  function makeFunction(func: FnType) {
+    const fName = `funcToCall_${funcCnt++}`;
+    window.webviewCallbacks[fName] = function (...args) {
+      const result = func(...args);
+      if (result instanceof (Promise)) {
+        result.then((res) => {
+          if (res !== true) {
+            delete window.webviewCallbacks[fName];
+          }
+        });
+      } else {
+        if (result !== true) {
+          delete window.webviewCallbacks[fName];
+        }
       }
     };
-    return ':' + fName + ':';
+    return `:${fName}:`;
   }
 
-  function makeParamWithObject(obj: IJSON) {
+  function makeParamWithObject(obj: Object) {
     // obj를 하위 써치해서 function일때만 문자열로 바꾼다.
     traverseForMakeParamWithObject(obj);
     return obj;
   }
 
-  function traverseForMakeParamWithObject(obj: IJSON) {
-    for (var k in obj) {
+  function traverseForMakeParamWithObject(obj: Object) {
+    for (const k in obj) {
       if (obj[k] && typeof obj[k] === 'object') {
         traverseForMakeParamWithObject(obj[k] as IJSON);
       } else {
         if (obj[k] && typeof obj[k] === 'function') {
-          obj[k] = makeFunction(obj[k] as Function);
+          obj[k] = makeFunction(obj[k] as FnType);
         }
       }
     }
@@ -68,74 +70,91 @@ function makeParamsString(params: Array<any>) {
         return param;
       } 
       else if (typeof param === 'function') {
-        return makeFunction(param);
+        return makeFunction(param as FnType);
       } else if (typeof param === 'object') {
         // item중에 function은 없다는 가정을 해야함.
-        return makeParamWithObject(param);
+        return makeParamWithObject(param as Object);
       }
       return '';
     })
   );
 }
 
+interface IReq {
+  targetWebviewId: string;
+  providerName: string;
+  functionName: string;
+  params: Array<IJSON> | string;
+}
+
+window.functionsProvider = {};
+
+
+/**
+ * 타 WebView에서 제공하는 함수를 호출한다.
+ * @param targetWebviewId 호출할 WebView의 Id
+ * @param req 호출할 WebView에서 제공하는 함수 호출 정보
+ */
 function execute(targetWebviewId: string, req: IReq) {
-  function traverse(obj: IJSON) {
-    for (var k in obj) {
+  function hasFunctionMark(param: string) {
+    return /^:[\w\W]+:$/.test(param);
+  }
+  function getFunctionName(param: string) {
+    return /^:([\w\W]+):$/.exec(param)?.[1] as string;
+  }
+  function traverse(obj: Object) {
+    for (const k in obj) {
       if (obj[k] && typeof obj[k] === 'object') {
-        traverse(obj[k] as IJSON);
+        traverse(obj[k] as Object);
       } else {
-        // Function key인 경우
         if (obj[k] && typeof obj[k] === 'string') {
           const strData = obj[k] as string;
-          if (/^:[\w\W]+:$/.test(strData)) {
-            var fName = /^:([\w\W]+):$/.exec(strData)?.[1];
-            if (fName) {
-              obj[k] = function () {
-                var args = Array.prototype.slice.call(arguments, 0);
-                invoke({
-                  targetWebviewId,
-                  namespace: 'webviewCallbacks',
-                  functionName: fName!,
-                  params: args,
-                });
-              };
-            } else {
-              // 에러
-            }
+          if (hasFunctionMark(strData)) {
+            const functionName = getFunctionName(strData);
+            obj[k] = function (...args) {
+              invoke({
+                targetWebviewId,
+                providerName: 'webviewCallbacks',
+                functionName,
+                params: args,
+              });
+            };
           }
         }
       }
     }
   }
 
-  var functionName = (window as any)[req.namespace][req.functionName];
-  var params = JSON.parse(req.params as string) as Array<any>;
-  params = params.map(function (param) {
+  const func = (window as any)[req.providerName][req.functionName] as FnType;
+  var params = JSON.parse(req.params as string) as Array<IJSON>;
+  params = params.map(function (param: IJSON) {
     if (typeof param === 'string') {
-      // function이면...
-      if (/^:[\w\W]+:$/.test(param)) {
-        var fName = /^:([\w\W]+):$/.exec(param)?.[1];
-        return function () {
-          var params = Array.prototype.slice.call(arguments, 0);
+      if (hasFunctionMark(param)) {
+        const functionName = getFunctionName(param);
+        return function (...args) {
           invoke({
             targetWebviewId,
-            namespace: 'webviewCallbacks',
-            functionName: fName!,
-            params
+            providerName: 'webviewCallbacks',
+            functionName,
+            params: args,
           });
         };
       }
     } else if (typeof param === 'object') {
-      traverse(param);
+      traverse(param as Object);
     }
     return param;
   });
 
-  functionName.apply(null, params);
+  func(...params);
 }
 
+/**
+ * 타 WebView에 함수 호출 정보를 전달한다.
+ * @param req 호출할 WebView에서 제공하는 함수 호출 정보
+ */
 function invoke(req: IReq) {
-  req.params = makeParamsString(req.params as Array<any>);
+  req.params = makeParamsString(req.params as Array<IJSON>);
   var reqString = JSON.stringify(req);
 
   // android bridge일때
@@ -197,13 +216,13 @@ export default {
       }
     });
   },
-  addMethod(fName: string, func: Function) {
-    window.FunctionsProvider[fName] = func;
+  addMethod(fName: string, func: FnType) {
+    window.functionsProvider[fName] = func;
   },
   invokeMethod(webViewId: string, functionName: string, params: Array<any>) {
     invoke({
       targetWebviewId: webViewId,
-      namespace: 'FunctionsProvider',
+      providerName: 'functionsProvider',
       functionName,
       params,
     });
